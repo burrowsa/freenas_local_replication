@@ -1,0 +1,81 @@
+#!/usr/local/bin/python
+from datetime import datetime
+import re
+import os
+from optparse import OptionParser
+
+
+def system(cmd):
+    if os.system(cmd):
+        raise RuntimeError("Error executing command '%s'" % cmd)
+
+
+def parse_snapshot(line):
+    elements = line.split('.', 1)
+    if len(elements) == 1:
+        return line, datetime(1970,1,1)
+    else:
+        return line, datetime.strptime(elements[1], '%Y%m%d.%H%M%S')
+
+
+def zfs_snapshots(volume):
+    with os.popen("""zfs list -t snapshot | egrep "^%s@" | awk '{ print $1 }' | sed 's/^.*@//'""" % volume) as stream:
+        return [ i[0] for i in sorted([ parse_snapshot(line[:-1]) for line in stream.readlines() ], key=lambda x:x[1])]
+
+
+def zfs_snapshot(volume):
+    new_snap = '%s.%s' % (backup_pool.replace('/','-'), timestamp.strftime("%Y%m%d.%H%M%S"))
+    system("zfs snapshot %s@%s" % (volume, new_snap))
+    return new_snap
+
+
+def volume_exists(volume):
+    return os.system("zfs list %s > /dev/null 2>&1" % volume) == 0
+
+
+def zfs_destroy(volume):
+    system("zfs destroy -r %s" % volume)
+
+
+def zfs_rollback(volume, snapshot):
+    system("zfs rollback %s@%s" % (volume, snapshot))
+
+
+def zfs_replicate_first(main_dataset, backup_dataset, new_snap):
+    system("zfs send %s@%s | zfs recv -F %s" % (main_dataset, new_snap, backup_dataset))
+
+
+def zfs_replicate_incremental(main_dataset, backup_dataset, last_snap, new_snap):
+    system("zfs send -i %s@%s %s@%s | zfs recv %s" % (main_dataset, last_snap, main_dataset, new_snap, backup_dataset))
+
+
+
+
+if __name__=='__main__':
+    parser = OptionParser()
+    parser.add_option("-f", "--first-run", action="store_true", dest="first_run", default=False)
+
+    (options, (main_dataset, backup_dataset)) = parser.parse_args()
+
+    timestamp = datetime.now()
+    main_pool = main_dataset.split("/")[0]
+    backup_pool = backup_dataset.split("/")[0]
+
+    if volume_exists(backup_pool):
+        snap = zfs_snapshots(backup_dataset)
+        if not options.first_run and len(snap) == 0:
+            raise RuntimeError("No previous snapshots - use first_run flag")
+    
+        new_snap = zfs_snapshot(main_dataset)
+    
+        if options.first_run:
+            if volume_exists(backup_dataset):
+                zfs_destroy(backup_dataset)
+            zfs_replicate_first(main_dataset, backup_dataset, new_snap)
+        else:
+            last_snap = snap[-1]
+            zfs_rollback(backup_dataset, last_snap)
+            zfs_replicate_incremental(main_dataset, backup_dataset, last_snap, new_snap)
+    else:
+        raise RuntimeError("Can not find backup_pool '%s'" % backup_pool)
+
